@@ -1,5 +1,7 @@
 <?php
+
 namespace huitiemesens\FunctionalTestGeneratorBundle\Command;
+
 use Symfony\Bundle\FrameworkBundle\Command\ContainerAwareCommand;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
@@ -12,7 +14,7 @@ class FunctionalTestGeneratorCommand extends ContainerAwareCommand
     protected $em;
     protected $entities = array();
     protected $namespace;
-    
+
     protected function configure()
     {
         $this
@@ -31,92 +33,103 @@ EOT
         ;
     }
 
-    
+
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-        $data = explode( ':' , $input->getArgument('bundle') );
-        $this->namespace =   $data[0];
-        $targetBundle = (!empty($data[1])) ? $data[1] : '';
-        if ( $targetBundle )
-        {
-            $output->writeln( "Every controllers included in $targetBundle will be generated");
-        }
-        
-        $routes = $this->getContainer()->get('router')->getRouteCollection()->all();
-        $match  = $this->namespace . $targetBundle ;
-        foreach ( $routes as $route) {
+        $this->namespace = str_replace(':', '\\', $input->getArgument('bundle'));
+        $trimLength = strlen($this->namespace . '\\Controller\\');
+        $output->writeln( "Every controller included in {$this->namespace} will be generated");
+        $controllers = [];
+
+        foreach ($this->getContainer()->get('router')->getRouteCollection() as $route) {
             $controller = $route->getDefault('_controller');
-            if (0 === strpos( $controller, $this->namespace . $targetBundle)) {
-                $controllerName = explode (":", str_ireplace( $match, "", $controller ));
-                if ( !empty ( $controllerName ) ){
-                    $controllers[$controllerName[1]][] = $route;
+            if (0 === strpos($controller, $this->namespace)) {
+                $controllerName = substr($controller, $trimLength, strrpos($controller, '::') - $trimLength);
+                if (!array_key_exists($controllerName, $controllers)) {
+                    $controllers[$controllerName] = [];
                 }
+                $controllers[$controllerName][] = $route;
             }
-            
-
         }
-        $this->generate($targetBundle, $controllers, $input, $output);
+
+        $this->generate($controllers, $input, $output);
     }
 
-    public function generate( $targetBundle, $controllers, $input, $output ){
-        if ( !empty( $controllers ) ){
-            $output->writeln( "Writing controller test");
-            foreach ( $controllers as $name => $routes ){
-                $addTest = $this->createControllerTestFile($targetBundle, $name);
-                $questionHelper = $this->getHelper('question');
+    public function generate(array $controllers, InputInterface $input, OutputInterface $output) {
+        if (!$controllers) {
+            return;
+        }
+        $bundleDir = $this->getContainer()->getParameter('kernel.root_dir') .
+            DIRECTORY_SEPARATOR .
+            '..' .
+            DIRECTORY_SEPARATOR .
+            'src' .
+            DIRECTORY_SEPARATOR .
+            str_replace('\\', DIRECTORY_SEPARATOR, $this->namespace) .
+            DIRECTORY_SEPARATOR
+        ;
 
-                if ($input->isInteractive()) {
-                    $question = new ChoiceQuestion("<question>Do you confirm generation of {$name} controller ? [y] Yes [n] No <question>", array('y', 'n'));
-                    $choice   = $questionHelper->ask($input, $output, $question);
-                    if ($choice !== 'y' ) {
-                        $output->writeln('<error>Command aborted</error>');
-                        return ;
-                    }
-                    foreach ( $routes as $route ){
-                        $match  = $this->namespace . $targetBundle;
-                        $ctrl = explode (":", str_ireplace( $match, "", $route->getDefault('_controller') ) );
-                        $actionName = end( $ctrl );
-                        $skip = 0;
-                        $output->writeln("\r\n<info>Generation test for route $actionName ...</info>");                        
-                        if ( $skip == 0){
-                            $dir =  dirname($this->getContainer()->getParameter('kernel.root_dir')).'/src/'.$this->namespace."/".$targetBundle;
-                            $this->generateDir($dir, $output);
-                              if ( !file_exists($dir."/Tests/SetUpFunctionalTest.php")){
-                                $output->writeln( "\r\n Generating SetUpFunctionalTest in {$targetBundle}.php ..." );
-                                file_put_contents($dir."/Tests/SetUpFunctionalTest.php", $this->generateSetupFunctionTest($targetBundle));
-                            }
-                            $addTest .= $this->addTestAction($actionName, $route);
-                        }
-                    }
-                    $addTest .= "
+        $setupFilePath = $bundleDir . DIRECTORY_SEPARATOR . 'Tests' . DIRECTORY_SEPARATOR . 'SetUpFunctionalTest.php';
+        $testDir = $bundleDir . DIRECTORY_SEPARATOR . 'Tests' . DIRECTORY_SEPARATOR . 'Controller' . DIRECTORY_SEPARATOR;
+
+        if (!file_exists($setupFilePath)){
+            $output->writeln("\r\n Generating SetUpFunctionalTest in <info>$setupFilePath</info> ...");
+            file_put_contents($setupFilePath, $this->generateSetupFunctionTest());
+        }
+
+        $output->writeln( "Writing controller test");
+        foreach ($controllers as $name => $routes) {
+            $addTest = $this->createControllerTestFile($name);
+
+            if ($input->isInteractive()) {
+                $question = new ChoiceQuestion(
+                    "Do you confirm generation of <info>$name</info> controller?",
+                    ['y' => 'Yes', 'n' => 'No'],
+                    'y'
+                );
+                $choice = $this->getHelper('question')->ask($input, $output, $question);
+                if ($choice !== 'y') {
+                    continue;
+                }
+                foreach ($routes as $route) {
+                    $fullActionName = $route->getDefault('_controller');
+                    $actionName = substr($fullActionName, strrpos($fullActionName, '::') + 2);
+                    $output->writeln("\r\n<info>Generating test for route $actionName ...</info>");
+
+                    $this->generateDir($bundleDir, $output);
+                    $addTest .= $this->addTestAction($actionName, $route);
+                }
+                $addTest .= "
 }";
-                file_put_contents($dir."/Tests/Controller/" . $name . "Test.php", $addTest);
-                }
+                file_put_contents($testDir . $name . "Test.php", $addTest);
             }
         }
     }
 
-    public function generateDir( $dir, $output )
+    public function generateDir($dir, $output)
     {
-        if ( !is_dir ( $dir."/Tests" ) ){
+        $testPath = $dir . 'Tests';
+        $controllerPath = $testPath . DIRECTORY_SEPARATOR . 'Controller';
+
+        if (!is_dir($testPath)) {
             $output->writeln( "\r\n Generating directory..." );
-            mkdir($dir."/Tests", 0755, true);
+            mkdir($testPath, 0755, true);
         }
-        if ( !is_dir( $dir."/Tests/Controller")){
+        if (!is_dir($controllerPath)) {
             $output->writeln( "\r\n Generating tests controller directory..." );
-            mkdir($dir."/Tests/Controller", 0755, true);
+            mkdir($controllerPath, 0755, true);
         }
     }
 
-    public function createControllerTestFile( $targetBundle, $name )
+    public function createControllerTestFile($name)
     {
         return "
 <?php
-namespace ".$this->namespace."\\".$targetBundle."\\Tests\\Controller;
+namespace {$this->namespace}\\Tests\\Controller;
 
-use ".$this->namespace."\\".$targetBundle."\\Tests\\SetUpFunctionalTest;
+use {$this->namespace}\\Tests\\SetUpFunctionalTest;
 /**
- * Generated tests for $targetBundle
+ * Generated tests for {$this->namespace}
  */
 class " . $name ."Test extends SetUpFunctionalTest
 {
@@ -129,7 +142,7 @@ class " . $name ."Test extends SetUpFunctionalTest
         // setup sqlite database via fixtures
         \$this->setUpClientAndUser();
     }
-";   
+";
     }
 
     public function addTestAction($actionName, $route)
@@ -222,10 +235,10 @@ class " . $name ."Test extends SetUpFunctionalTest
 ";
     }
 
-    public function generateSetupFunctionTest($targetBundle)
+    public function generateSetupFunctionTest()
     {
         return "<?php
-namespace ".$this->namespace."\\".$targetBundle."\\Tests;
+namespace {$this->namespace}\\Tests;
 use Doctrine\Common\DataFixtures\Executor\ORMExecutor;
 use Doctrine\Common\DataFixtures\Loader;
 use Doctrine\Common\DataFixtures\Purger\ORMPurger;

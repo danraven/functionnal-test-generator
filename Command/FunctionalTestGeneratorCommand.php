@@ -8,6 +8,9 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ChoiceQuestion;
+use Symfony\Component\Routing\Route;
+use huitiemesens\FunctionalTestGeneratorBundle\Model\ControllerDefinition;
+use huitiemesens\FunctionalTestGeneratorBundle\Model\ActionDefinition;
 
 class FunctionalTestGeneratorCommand extends ContainerAwareCommand
 {
@@ -19,40 +22,59 @@ class FunctionalTestGeneratorCommand extends ContainerAwareCommand
     {
         $this
             ->setName('tests:generate')
-            ->setDescription('Generate PHPUnit skeletons tests for symfony2 bundles')
-            ->setDefinition(array(
-                new InputArgument('bundle', InputArgument::REQUIRED, 'Specify which bundle to operate'),
-                new InputOption('step', null, InputOption::VALUE_NONE, 'If defined, the generation will ask for each entity generation')
-            ))
-            ->setHelp(<<<EOT
-The <info>tests:generate</info> command generate all Sonata admin files in order to manage all entities included in a defined bundle:
-  <info>php app/console tests:generate recetas:myBundle</info>
-This interactive will generate all Sonata admin stuff included in myBundle.
-EOT
-            )
+            ->setDescription('Generate PHPUnit skeletons tests for Symfony bundle namespaces')
+            ->addArgument('namespace', InputArgument::REQUIRED, 'Specify the namespace of the controllers')
         ;
     }
 
 
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-        $this->namespace = str_replace(':', '\\', $input->getArgument('bundle'));
-        $trimLength = strlen($this->namespace . '\\Controller\\');
-        $output->writeln( "Every controller included in {$this->namespace} will be generated");
+        $namespace = str_replace(':', '\\', $input->getArgument('namespace'));
+        $controllerNamespace = $namespace . '\\Controller\\';
+
+        $output->writeln("Looking up controllers under <info>$namespace</info>...");
+
         $controllers = [];
+        $skippable = [];
 
         foreach ($this->getContainer()->get('router')->getRouteCollection() as $route) {
-            $controller = $route->getDefault('_controller');
-            if (0 === strpos($controller, $this->namespace)) {
-                $controllerName = substr($controller, $trimLength, strrpos($controller, '::') - $trimLength);
-                if (!array_key_exists($controllerName, $controllers)) {
-                    $controllers[$controllerName] = [];
-                }
-                $controllers[$controllerName][] = $route;
+            $actionId = $route->getDefault('_controller');
+            $controllerId = substr($actionId, 0, strpos(':', $actionId));
+
+            if (in_array($controllerId, $skippable)) {
+                continue;
+            }
+
+            if (array_key_exists($controllerId, $controllers)) {
+                $controllers[$controllerId]->addAction(new ActionDefinition($route));
+                continue;
+            }
+
+            $controller = $this->getControllerDefinition($controllerId);
+            if (0 === strpos($controller->getControllerNamespace(), $controllerNamespace)) {
+                $controller->addAction(new ActionDefinition($route));
+                $controllers[$controllerId] = $controller;
             }
         }
 
         $this->generate($controllers, $input, $output);
+    }
+
+    /**
+     * @param string $id
+     * @return ControllerActionDefinition
+     */
+    protected function getControllerDefinition($id)
+    {
+        // controller might be a registered service, in this case we'll need the FQCN of the service class
+        $fqcn = $this->getContainer()->has($id) ? get_class($this->getContainer()->get($id)) : $id;
+
+        $classDefinition = explode('\\', $fqcn);
+        $controllerName = array_pop($classDefinition);
+        $controllerNamespace = implode('\\', $classDefinition);
+
+        return new ControllerDefinition($controllerNamespace, $controllerName, $id);
     }
 
     public function generate(array $controllers, InputInterface $input, OutputInterface $output) {
